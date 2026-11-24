@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "event-grey"
+version = "0.1.0"
+description = "Reconstruct high-temporal-resolution grayscale frames from event-camera data with sparse absolute-brightness anchors"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+    "matplotlib>=3.5",
+    "pillow>=9",
+    "imageio>=2.20",
+    "imageio-ffmpeg>=0.4",
+]
+
+[project.scripts]
+event-gray = "event_grey.cli:main"
+event-gray-player = "event_grey.player:main"
+
+[tool.setuptools]
+packages = ["event_grey"]
+
+[tool.setuptools.package-data]
+event_grey = []

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>事件灰度重建 · 运动分析播放器</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>事件相机灰度重建 · 运动分析播放器</h1>
+  <div class="scenario">
+    <label>场景
+      <select id="scene-select"></select>
+    </label>
+    <label>锚点覆盖率 <input id="coverage" type="number" min="0.01" max="1" step="0.01" value="0.15" style="width:5em"></label>
+    <label>注入失效锚点
+      <select id="corrupt">
+        <option value="0" selected>否</option>
+        <option value="1">是（中部锚点）</option>
+      </select>
+    </label>
+    <label>帧率 <input id="fps" type="number" min="2" max="60" value="20" style="width:4em"></label>
+    <button id="reload">重建数据集</button>
+    <span id="dataset-info" class="muted"></span>
+  </div>
+</header>
+
+<main>
+  <section class="panels">
+    <figure>
+      <figcaption>事件分布（所选时间窗，红=ON / 蓝=OFF）</figcaption>
+      <img id="event-img" alt="event distribution">
+      <div id="event-stats" class="stats"></div>
+    </figure>
+    <figure>
+      <figcaption>重建灰度图（黄色=无锚点/先验支持）</figcaption>
+      <img id="grey-img" alt="reconstructed grayscale">
+      <div class="stats">
+        <label><input type="checkbox" id="show-ref"> 叠加模拟器参考帧（仅评估，不参与重建）</label>
+      </div>
+    </figure>
+  </section>
+
+  <section class="controls">
+    <button id="play">▶ 播放</button>
+    <label>t = <span id="t-label">0.000</span> s</label>
+    <input type="range" id="time-slider" min="0" max="1000" value="0" style="flex:1">
+    <label>时间窗宽 <input type="number" id="window" min="0.005" step="0.005" value="0.05" style="width:5em"> s</label>
+  </section>
+
+  <section class="lower">
+    <figure class="trace">
+      <figcaption>
+        像素事件积分与锚点校正 — 像素
+        (<input type="number" id="px" value="40" min="0" style="width:4em">,
+        <input type="number" id="py" value="32" min="0" style="width:4em">)
+        <button id="pick-pixel">在灰度图上点选</button>
+      </figcaption>
+      <canvas id="trace-canvas" width="900" height="320"></canvas>
+      <div id="pixel-stats" class="stats"></div>
+    </figure>
+
+    <figure class="anomalies">
+      <figcaption>异常提示（由事件灰度界面给出）</figcaption>
+      <ul id="anomaly-list"></ul>
+      <figcaption style="margin-top:8px">锚点校正记录</figcaption>
+      <ul id="anchor-list" class="anchor-list"></ul>
+    </figure>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
