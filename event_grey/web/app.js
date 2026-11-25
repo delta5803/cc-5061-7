@@ -29,6 +29,14 @@ async function loadState() {
     `${state.shape[1]}x${state.shape[0]} 传感器 · ` +
     `${state.n_events} 事件 · ${state.n_frames} 输出帧 · ` +
     `阈值 C=${state.contrast.toFixed(2)} · ${state.anchor_times.length} 个锚点`;
+  const tc = state.trace_consistency;
+  if (tc && tc.pixels_checked > 0) {
+    $("trace-consistency").textContent =
+      `轨迹/帧一致性 max|diff|=${tc.max_abs_diff.toExponential(1)} ` +
+      `(${tc.pixels_checked} 像素)`;
+    $("trace-consistency").className =
+      tc.max_abs_diff > 1e-9 ? "trace-bad" : "trace-ok";
+  }
   renderAnomalies();
   renderAnchors();
   frameIdx = 0;

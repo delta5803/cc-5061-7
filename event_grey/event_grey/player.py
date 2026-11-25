@@ -93,6 +93,9 @@ def make_handler(session_holder):
                     "anchor_times": [a["t"] for a in s.anchors],
                     "anomalies": s.anomalies,
                     "anchor_summary": s.anchor_summary(),
+                    "trace_consistency": getattr(
+                        s, "trace_consistency",
+                        {"max_abs_diff": 0.0, "pixels_checked": 0}),
                 })
             elif path == "/api/reload":
                 scene = qs.get("scene", [s.bundle["scene_name"]])[0]

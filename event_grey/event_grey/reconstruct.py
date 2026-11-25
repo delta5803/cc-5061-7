@@ -107,6 +107,11 @@ class Reconstructor:
         prior = prior or make_prior(self.shape)
         self.logL = prior["logL"].copy()
         self.supported = np.array(prior["supported"], dtype=bool, copy=True)
+        # The starting state before any event or anchor.  ``pixel_trace`` must
+        # begin from this exact prior, not a hard-coded neutral grey, or the
+        # per-pixel plot would disagree with the reconstructed frames.
+        self._prior_logL = self.logL.copy()
+        self._prior_supported = self.supported.copy()
         # Number of events integrated per pixel (for diagnostics/UI).
         self.event_count = np.zeros(self.shape, dtype=np.int64)
         self.net_polarity = np.zeros(self.shape, dtype=np.int64)
@@ -127,13 +132,21 @@ class Reconstructor:
         self.anchors.sort(key=lambda a: a["t"])
 
     # ------------------------------------------------------------------ #
-    def _apply_anchor(self, anchor):
-        logL = self.logL
+    def _anchor_effect(self, anchor, logL, supported):
+        """Apply one anchor to ``(logL, supported)`` in place.
+
+        This is the single source of truth for anchor semantics: the
+        streaming sweep (``_apply_anchor``) and the per-pixel trace replay
+        (``pixel_trace``) both call it, so the player can never disagree with
+        the frames it renders.  Returns ``(report, kinds)`` where ``kinds``
+        is a per-pixel array of ``"blend"/"reset"/"first"/""`` for a
+        successful anchor, or ``None`` when the whole anchor is rejected.
+        """
         valid = anchor["valid"]
         target = anchor["logL"]
         n_supported = int(valid.sum())
         if n_supported == 0:
-            report = AnchorReport(
+            return AnchorReport(
                 t=anchor["t"],
                 supported_pixels=0,
                 reset_pixels=0,
@@ -141,12 +154,7 @@ class Reconstructor:
                 global_drift=0.0,
                 failed=True,
                 reason="anchor has no supported pixels",
-            )
-            self.reports.append(report)
-            self.warnings.append(
-                f"t={anchor['t']:.4f}s: anchor rejected (empty support mask)"
-            )
-            return report
+            ), None
 
         drift = target - logL
         observed = drift[valid]
@@ -156,7 +164,7 @@ class Reconstructor:
         # (corruption / dropped sync).  Rejecting it keeps a bad frame from
         # poisoning every pixel; the next good anchor will reveal the drift.
         if abs(global_drift) > self.anchor_fail_drift:
-            report = AnchorReport(
+            return AnchorReport(
                 t=anchor["t"],
                 supported_pixels=n_supported,
                 reset_pixels=0,
@@ -165,19 +173,12 @@ class Reconstructor:
                 failed=True,
                 reason=f"median drift {global_drift:.3f} exceeds "
                 f"failure band {self.anchor_fail_drift:.3f}",
-            )
-            self.reports.append(report)
-            self.warnings.append(
-                f"t={anchor['t']:.4f}s: anchor FAILED "
-                f"(median drift {global_drift:+.3f} log units) - ignored, "
-                f"relying on event integration until next anchor"
-            )
-            return report
+            ), None
 
         reset_mask = valid & (np.abs(drift) > self.reset_drift)
         # A pixel meeting its first anchor has no measured level yet: the
         # neutral prior is not information, so take the anchor fully.
-        first_mask = valid & ~self.supported
+        first_mask = valid & ~supported
         blend_mask = valid & ~reset_mask & ~first_mask
 
         w = self.anchor_blend * float(anchor.get("weight", 1.0))
@@ -186,8 +187,12 @@ class Reconstructor:
             logL[blend_mask] = (1.0 - w) * logL[blend_mask] + w * target[blend_mask]
         if np.any(reset_mask | first_mask):
             logL[reset_mask | first_mask] = target[reset_mask | first_mask]
-        self.supported[valid] = True
-        self._last_anchor_t = anchor["t"]
+        supported[valid] = True
+
+        kinds = np.full(valid.shape, "", dtype=object)
+        kinds[blend_mask] = "blend"
+        kinds[reset_mask] = "reset"
+        kinds[first_mask] = "first"
 
         report = AnchorReport(
             t=anchor["t"],
@@ -196,7 +201,24 @@ class Reconstructor:
             blended_pixels=int(blend_mask.sum()) + int(first_mask.sum()),
             global_drift=global_drift,
         )
+        return report, kinds
+
+    def _apply_anchor(self, anchor):
+        report, _ = self._anchor_effect(anchor, self.logL, self.supported)
         self.reports.append(report)
+        if report.failed:
+            if report.supported_pixels == 0:
+                self.warnings.append(
+                    f"t={anchor['t']:.4f}s: anchor rejected (empty support mask)"
+                )
+            else:
+                self.warnings.append(
+                    f"t={anchor['t']:.4f}s: anchor FAILED "
+                    f"(median drift {report.global_drift:+.3f} log units) - "
+                    f"ignored, relying on event integration until next anchor"
+                )
+            return report
+        self._last_anchor_t = anchor["t"]
         return report
 
     # ------------------------------------------------------------------ #
@@ -215,6 +237,17 @@ class Reconstructor:
         np.maximum.at(
             self.last_event_t, (events["y"], events["x"]), events["t"]
         )
+
+    def _integrate_logL(self, logL, events):
+        """Pure signed-log-brightness integration into a caller-owned array.
+
+        Used by ``pixel_trace`` so its replay shares the exact integration
+        increment with the streaming sweep without touching live diagnostics.
+        """
+        if events.size == 0:
+            return
+        inc = np.where(events["p"] == 1, self.contrast, -self.contrast)
+        np.add.at(logL, (events["y"], events["x"]), inc)
 
     # ------------------------------------------------------------------ #
     def run(self, events, output_times):
@@ -298,6 +331,14 @@ class Reconstructor:
         log-brightness trajectory, the anchor-corrected trajectory and the
         anchor correction points.  This is exactly what the GUI plots for
         the selected pixel.
+
+        The corrected trajectory is produced by replaying the *same* sweep
+        the reconstructed frames use -- anchors applied at their own
+        timestamps, events interleaved in between, failed anchors rejected
+        and the caller's actual prior as the starting state.  The plotted
+        value at each output time therefore equals ``frame[y, x]`` of the
+        reconstruction at that time; it is not a second, independently
+        ordered integration.
         """
         events = sort_events(events)
         m = (events["x"] == x) & (events["y"] == y)
@@ -312,39 +353,48 @@ class Reconstructor:
                 j += 1
             raw[i] = level
 
-        corrected = np.full_like(output_times, np.nan)
+        # Replay the reconstruction sweep on a private copy of the frame
+        # state so the trace matches the emitted frames exactly.
+        logL = self._prior_logL.copy()
+        supported = self._prior_supported.copy()
+        corrected = np.full_like(output_times, np.nan, dtype=np.float64)
         anchor_points = []
-        base = float(make_prior(self.shape)["logL"][y, x])
-        level = base
-        has_support = False
-        j = 0
+
         anchor_queue = sorted(self.anchors, key=lambda a: a["t"])
+        anchor_idx = 0
+        cursor = 0  # next unprocessed event index
+
         for i, t in enumerate(output_times):
-            while j < pe.size and pe[j]["t"] <= t:
-                level += self.contrast if pe[j]["p"] == 1 else -self.contrast
-                j += 1
-            while anchor_queue and anchor_queue[0]["t"] <= t:
-                a = anchor_queue.pop(0)
-                if a["valid"][y, x]:
-                    target = float(a["logL"][y, x])
-                    drift = target - level
-                    if not has_support or abs(drift) > self.reset_drift:
-                        level = target
-                        kind = "reset" if has_support else "first"
-                    else:
-                        w = min(self.anchor_blend * a.get("weight", 1.0), 1.0)
-                        level = (1 - w) * level + w * target
-                        kind = "blend"
-                    has_support = True
-                    anchor_points.append((a["t"], level, kind, drift))
-            corrected[i] = level
+            # Anchors at or before this output time are applied at their own
+            # timestamp, after integrating the events that precede them.
+            while (anchor_idx < len(anchor_queue)
+                   and anchor_queue[anchor_idx]["t"] <= t):
+                anchor = anchor_queue[anchor_idx]
+                end = np.searchsorted(events["t"], anchor["t"], side="right")
+                if end > cursor:
+                    self._integrate_logL(logL, events[cursor:end])
+                    cursor = end
+                drift = float(anchor["logL"][y, x]) - float(logL[y, x])
+                report, kinds = self._anchor_effect(anchor, logL, supported)
+                if kinds is not None and anchor["valid"][y, x]:
+                    anchor_points.append((
+                        anchor["t"], float(logL[y, x]),
+                        kinds[y, x], drift,
+                    ))
+                anchor_idx += 1
+
+            end = np.searchsorted(events["t"], t, side="right")
+            if end > cursor:
+                self._integrate_logL(logL, events[cursor:end])
+                cursor = end
+            corrected[i] = logL[y, x]
 
         return {
             "x": x,
             "y": y,
             "events": pe,
             "times": np.asarray(output_times, dtype=np.float64),
-            "raw_integration": raw + base,
+            "raw_integration": raw + float(self._prior_logL[y, x]),
             "corrected": corrected,
             "anchor_points": anchor_points,
         }

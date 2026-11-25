@@ -93,6 +93,40 @@ class AnalysisSession:
                 "level": "info",
                 "message": "Event stream is empty; only anchor data is shown",
             })
+        self._check_trace_consistency()
+
+    def _check_trace_consistency(self):
+        """Verify the per-pixel trace the player plots agrees with the frames
+        the player renders.  Both are produced by the same kernel; if they
+        ever diverge the trace path has re-introduced its own ordering/state
+        logic, and the UI must say so instead of showing a wrong trajectory."""
+        frames = self.result.frame_array()
+        if frames.size == 0:
+            return
+        self.trace_consistency = {"max_abs_diff": 0.0, "pixels_checked": 0}
+        h, w = self.shape
+        step_x = max(1, w // 6)
+        step_y = max(1, h // 6)
+        worst = 0.0
+        checked = 0
+        for y in range(0, h, step_y):
+            for x in range(0, w, step_x):
+                trace = self.pixel_trace(x, y)
+                diff = float(np.max(np.abs(trace["corrected"] - frames[:, y, x])))
+                worst = max(worst, diff)
+                checked += 1
+        self.trace_consistency = {
+            "max_abs_diff": worst, "pixels_checked": checked,
+        }
+        if worst > 1e-9:
+            self.anomalies.append({
+                "level": "error",
+                "message": (
+                    f"Per-pixel trace disagrees with reconstructed frames "
+                    f"(max |diff|={worst:.4g} log units over {checked} "
+                    f"pixels). The trace is NOT the kernel output."
+                ),
+            })
 
     # ------------------------------------------------------------------ #
     def frame_index(self, t):
